@@ -1,0 +1,97 @@
+# AI Trust Chain Framework - Git Ignore File
+# Copyright (C) 2025 Mossrake Group, LLC
+# 
+# Based on proprietary framework design by Mossrake Group, LLC
+# Implementation released under GNU AGPL v3.0
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Trust Chain Data Files
+trust_registry.json
+trust_chain.db
+trust_chain.db-journal
+*.db
+*.db-journal
+
+# Logs
+*.log
+logs/
+*.pid
+
+# Testing
+.coverage
+.pytest_cache/
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# Documentation
+docs/_build/
+docs/_static/
+docs/_templates/
+
+# Environment Variables
+.env
+.env.local
+.env.*.local
+
+# Backup files
+*.bak
+*.backup
+*_backup
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Jupyter Notebooks (if used for testing)
+.ipynb_checkpoints
+*.ipynb
+
+# Security - Never commit these
+*.key
+*.pem
+*.crt
+*.cert
+secrets/
+credentials/

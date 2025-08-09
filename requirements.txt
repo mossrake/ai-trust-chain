@@ -1,0 +1,26 @@
+# AI Trust Chain Framework - Python Dependencies
+# Copyright (C) 2025 Mossrake Group, LLC
+# 
+# Based on proprietary framework design by Mossrake Group, LLC
+# Implementation released under GNU AGPL v3.0
+
+# Web Framework
+Flask==3.0.0
+Flask-CORS==4.0.0
+Werkzeug==3.0.1
+
+# Database
+# SQLite3 is included in Python standard library
+
+# Testing (optional, for development)
+pytest==7.4.3
+pytest-cov==4.1.0
+requests==2.31.0
+
+# Production Server (optional, for deployment)
+gunicorn==21.2.0
+
+# Development Tools (optional)
+black==23.12.1
+flake8==6.1.0
+mypy==1.7.1
