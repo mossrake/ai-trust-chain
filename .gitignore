@@ -73,6 +73,7 @@ docs/_templates/
 .env
 .env.local
 .env.*.local
+trust.env
 
 # Backup files
 *.bak
