@@ -1,6 +1,97 @@
-# AI Trust Chain Framework - API Documentation
+# AI Trust Chain Framework
+
+An implementation of the AI Trust Chain framework for auditable decision support systems.
+
+## Overview
+
+The AI Trust Chain framework addresses the fundamental challenge of making confident, defensible decisions based on AI recommendations while maintaining transparency about supporting evidence. By separating confidence from trust, the framework protects against recommendations that appear certain but rest on untrustworthy foundations.
+
+## Core Concepts
+
+### Trust vs Confidence
+
+- **Confidence**: An endpoint's self-reported certainty in its assertion
+- **Trust**: The system's assessment of an endpoint's assertions based on historical performance, contextual appropriateness, and known limitations
+
+### Trust Propagation
+
+Trust flows through the system following precise rules:
+1. Trust values of consumed assertions
+2. Materiality weights for each input
+3. Endpoint-specific trust ceilings
+4. Propagation factors
+
+### Immutable Audit Trail
+
+Every assertion is recorded in a blockchain-based ledger, providing:
+- Complete traceability from recommendations to source data
+- Cryptographic proof of unaltered trust evaluations
+- Comprehensive accountability for AI-informed decisions
+
+## Architecture Decisions
+
+### Endpoint-Managed Trust Understanding
+
+The AI Trust Chain framework delegates trust explanation interpretation to individual endpoints rather than handling it in the kernel. This design decision provides several benefits:
+
+1. **Separation of Concerns**: The kernel focuses solely on trust calculation and propagation mechanics, while endpoints handle domain-specific interpretation.
+
+2. **Flexibility**: Each endpoint can use its own AI/LLM service (Azure OpenAI, AWS Bedrock, local models, etc.) to understand trust implications relevant to its domain.
+
+3. **Context-Aware Materiality**: Endpoints can dynamically adjust materiality based on their understanding of trust explanations from consumed assertions.
+
+4. **Domain Expertise**: Endpoints best understand how trust issues in their inputs affect their outputs.
+
+#### Implementation Pattern
+
+Endpoints that need to understand trust explanations should:
+
+1. Retrieve trust explanations from consumed assertions
+2. Call their preferred AI service to interpret implications
+3. Adjust materiality and confidence based on understanding
+4. Include synthesized understanding in their own assertion
+
+Example:
+```python
+# In endpoint implementation
+def create_assertion_with_understanding(consumed_assertions):
+    # Get trust details from consumed assertions
+    trust_details = [get_assertion_details(id) for id in consumed_assertions]
+    
+    # Use AI to understand implications
+    understanding = call_ai_service(trust_details, endpoint_context)
+    
+    # Adjust materiality based on understanding
+    materiality = calculate_materiality(understanding)
+    
+    # Create assertion with informed decisions
+    return create_assertion(
+        content=process_data(),
+        materiality=materiality,
+        confidence=adjusted_confidence(understanding)
+    )
+```
+
+This approach keeps the kernel lightweight while enabling sophisticated trust comprehension at the endpoint level.
 
 ## Quick Start
+
+### Prerequisites
+
+- Python 3.8+
+- PostgreSQL 12+ (or SQLite for development)
+- Redis (optional, for caching)
+
+### Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/mossrake/ai-trust-chain.git
+cd ai-trust-chain
+
+# Install dependencies
+pip install -r requirements.txt
+```
 
 ### 1. Start the REST API Server
 
@@ -33,6 +124,11 @@ curl -X POST http://localhost:5000/api/v1/assertions \
     "confidence": 0.95
   }'
 ```
+
+### 4. View the evidence chain
+```bash
+curl -X GET http://localhost:5000/api/v1/assertions/{id}/evidence \
+  -H "Authorization: Bearer user-token"
 
 ## API Documentation
 
@@ -451,23 +547,62 @@ else:
 }
 ```
 
-## HTTP Status Codes
 
-- `200 OK` - Successful GET request
-- `201 Created` - Successful resource creation
-- `400 Bad Request` - Invalid request parameters
-- `401 Unauthorized` - Missing or invalid authentication
-- `403 Forbidden` - Insufficient permissions
-- `404 Not Found` - Resource not found
-- `500 Internal Server Error` - Server error
+## Architecture
 
-## Trust-Confidence Matrix
+```
+┌─────────────────────────────────────────────────┐
+│                  Endpoints                       │
+│  (Sensors, APIs, ML Models, LLMs)               │
+│  - Create assertions                             │
+│  - Understand trust explanations                 │
+│  - Apply materiality                             │
+└─────────────────────────────────────────────────┘
+                        ↓
+┌─────────────────────────────────────────────────┐
+│              Trust Kernel                        │
+│  - Calculate trust propagation                   │
+│  - Apply trust ceilings                          │
+│  - Generate basic explanations                   │
+└─────────────────────────────────────────────────┘
+                        ↓
+┌─────────────────────────────────────────────────┐
+│           Blockchain Ledger                      │
+│  - Immutable assertion storage                   │
+│  - Cryptographic verification                    │
+│  - Complete audit trail                          │
+└─────────────────────────────────────────────────┘
+```
 
-The framework provides decision guidance based on trust-confidence combinations:
+## Contributing
 
-| Trust | Confidence | Status | Recommendation |
-|-------|------------|--------|----------------|
-| High (≥0.7) | High (≥0.7) | Green | Proceed with minimal oversight |
-| High (≥0.7) | Low (<0.7) | Yellow | Apply human judgment to ambiguous situations |
-| Low (<0.7) | High (≥0.7) | Red | Exercise extreme caution due to potential overconfidence |
-| Low (<0.7) | Low (<0.7) | Gray | Seek alternative information sources or defer decisions |
+At this time we are not accepting contributions.  In the future, please read [CONTRIBUTING.md](CONTRIBUTING.md) for details on our code of conduct and the process for submitting pull requests.
+
+## License
+
+This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0) - see the [LICENSE](LICENSE) file for details.
+
+## Citation
+
+If you use this framework in your research, please cite:
+
+```bibtex
+@software{ai_trust_chain,
+  title = {AI Trust Chain: A Framework for Auditable Decision Support},
+  author = {Mossrake Group, LLC},
+  year = {2025},
+  url = {https://github.com/mossrake/ai-trust-chain}
+}
+```
+
+## Support
+
+- Documentation: [https://mossrake.com/ai-trust-chain](https://mossrake.com/ai-trust-chain)
+- Issues: [GitHub Issues](https://github.com/mossrake/ai-trust-chain/issues)
+- ##Discussion: [GitHub Discussions](https://github.com/mossrake/ai-trust-chain/discussions)
+
+## Acknowledgments
+
+- Based on the AI Trust Chain framework whitepaper
+- Inspired by challenges in enterprise AI adoption
+- Built for transparency and accountability in AI systems

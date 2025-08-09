@@ -19,7 +19,7 @@ import hashlib
 import json
 import time
 import uuid
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict as _asdict
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -29,6 +29,18 @@ import threading
 
 # Thread-local storage for database connections
 _thread_local = threading.local()
+
+def asdict(obj):
+    """Custom asdict that converts Enums to their values"""
+    def dict_factory(field_list):
+        result = {}
+        for key, value in field_list:
+            if isinstance(value, Enum):
+                result[key] = value.value
+            else:
+                result[key] = value
+        return result
+    return _asdict(obj, dict_factory=dict_factory)
 
 class EndpointType(Enum):
     """Enumeration of supported endpoint types"""
@@ -363,10 +375,8 @@ class BlockchainAuditTrail:
         
         # Convert metadata to dict and handle enum serialization
         if assertion.metadata:
-            metadata_dict = asdict(assertion.metadata)
             # Convert EndpointType enum to string for JSON serialization
-            if 'endpoint_type' in metadata_dict and metadata_dict['endpoint_type']:
-                metadata_dict['endpoint_type'] = metadata_dict['endpoint_type'].value
+            metadata_dict = asdict(assertion.metadata)
             metadata_json = json.dumps(metadata_dict)
         else:
             metadata_json = '{}'
@@ -503,10 +513,10 @@ class TrustKernel:
             consumed_assertion_ids: List of assertion IDs this assertion is based on
             limitations: Any limitations or caveats about this assertion
         
-        Note: Sophisticated endpoints may use LLMs to INTERPRET trust explanations
+        Note: Sophisticated endpoints may use AI (LLMs) to INTERPRET trust explanations
         from consumed assertions and adjust trust accordingly. LLMs are NOT required
         to generate assertions or explanations - simple templates can generate explanations.
-        LLMs are only needed when an endpoint wants to understand and act on explanations
+        LLMs may be needed when an endpoint wants to understand and act on explanations
         from consumed assertions.
         """
         consumed_assertion_ids = consumed_assertion_ids or []
@@ -526,16 +536,14 @@ class TrustKernel:
                 materiality = 1.0  # Equal weight for reference implementation
                 consumed_trusts.append((consumed.metadata.trust_value, materiality))
                 
-                # STUB: Sophisticated endpoints with LLM access could INTERPRET explanations
+                # STUB: Sophisticated endpoints with AI (LLM) access can INTERPRET explanations
                 # from consumed assertions to make trust adjustments:
                 # 
                 # if consumed.metadata.trust_explanation:
-                #     # Use LLM to understand if "sensor uncalibrated for 3 years" matters
-                #     if self.llm and self.can_interpret_explanation(consumed.metadata.trust_explanation):
-                #         adjusted_trust = self.llm.evaluate_trust_relevance(
-                #             consumed.metadata.trust_explanation,
-                #             self.operational_context
-                #         )
+                #     # Use AI to understand if "sensor uncalibrated for 3 years" matters
+                #     understanding = self.understand_trust_explanation(consumed.metadata.trust_explanation, "ml_model")
+                #     if understanding:
+                #         adjusted_trust = ...
                 #         # Override trust if context makes it more/less relevant
                 #         consumed_trusts[-1] = (adjusted_trust, materiality)
         
@@ -545,16 +553,11 @@ class TrustKernel:
         
         # Create metadata wrapper with trust explanation if endpoint can generate it
         trust_explanation = None
-        # STUB: Endpoints can generate explanations using templates or LLMs
+        # STUB: Endpoints generate explanations using templates
         # Simple example with templates:
         # if trust_value < 0.5:
         #     trust_explanation = f"Trust is low ({trust_value:.2f}) due to upstream data quality issues"
         # 
-        # Sophisticated example with LLM:
-        # if self.has_llm_service:
-        #     trust_explanation = self.generate_trust_explanation(
-        #         trust_value, consumed_trusts, limitations
-        #     )
         
         metadata = TrustMetadata(
             trust_value=trust_value,
