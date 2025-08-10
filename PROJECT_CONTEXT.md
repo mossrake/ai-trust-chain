@@ -53,7 +53,7 @@ The AI Trust Chain Framework addresses the fundamental challenge of making confi
   - Example: Freezer monitor upgrades trust for "out of range" temperature sensor
 - **LLM integration**: For INTERPRETATION, not required for generation
   - Simple templates can generate explanations
-  - LLMs needed to understand and act on explanations
+  - AI (LLMs) may be used to understand and act on explanations
 
 ### 8. Blockchain Implementation
 - **SQLite for development**: Simple, file-based blockchain
@@ -69,7 +69,7 @@ The AI Trust Chain Framework addresses the fundamental challenge of making confi
 
 ## Implementation Status
 
-### ✅ Fully Implemented
+### ✅ Fully Implemented (reference)
 - Core trust kernel with propagation
 - REST API with all CRUD operations
 - Blockchain audit trail (SQLite)
@@ -161,7 +161,7 @@ Response:
 - An immutable audit trail for AI decisions
 - A framework for explainable AI
 - Uses a pass-through authentication system
-- A reference implementation of the whitepaper
+- A reference implementation of the Mossrake whitepaper "AI Trust Chain" Version 1.0 https://mossrake.com/ai-trust-chain
 
 ### What This System IS NOT
 - An authentication/authorization system (delegates to external)

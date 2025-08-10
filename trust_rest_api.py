@@ -225,6 +225,8 @@ def create_assertion():
     - endpoint_type: Type of endpoint (sensor, ml_model, llm, etc.)
     - content: The assertion data
     - confidence: Self-reported confidence (0.0-1.0)
+    - trust_value: (0.0-1.0)
+    - trust_explanation: (optional)
     - consumed_assertions: List of assertion IDs this is based on (optional)
     - limitations: Any limitations or caveats (optional)
     
@@ -232,12 +234,23 @@ def create_assertion():
     by the endpoint based on its logic, not passed via API.
     """
     data = request.get_json()
+
+    print( f'!!!!!assertion: {data}')
     
-    required_fields = ['endpoint_id', 'endpoint_class', 'endpoint_type', 'content', 'confidence']
-    if not all(field in data for field in required_fields):
+    required_fields = ['endpoint_id', 'endpoint_class', 'endpoint_type', 'content', 
+        'confidence','trust_value', 'trust_explanation']
+    
+    #if not all(field in data for field in required_fields):
+    missing_fields = []
+    for field in required_fields :
+        if field not in data : 
+            missing_fields.append(field)
+            break
+    
+    if len(missing_fields) > 0 :
         return jsonify(ApiResponse(
             success=False,
-            error=f"Required fields: {required_fields}"
+            error=f"Missing fields: {missing_fields}"
         ).to_json()), 400
     
     try:
@@ -248,10 +261,14 @@ def create_assertion():
             endpoint_class=data['endpoint_class'],
             endpoint_type=endpoint_type,
             content=data['content'],
+            trust_explanation = data['trust_explanation'],
+            trust_value = data['trust_value'],
             confidence=float(data['confidence']),
             consumed_assertion_ids=data.get('consumed_assertions', []),
             limitations=data.get('limitations', {})
         )
+
+        print( f'assertion: {assertion}')
         
         return jsonify(ApiResponse(
             success=True,
@@ -260,7 +277,8 @@ def create_assertion():
                 'trust_value': assertion.metadata.trust_value,
                 'confidence_value': assertion.metadata.confidence_value,
                 'temporal_validity': assertion.metadata.temporal_validity,
-                'trust_explanation': assertion.metadata.trust_explanation
+                'trust_explanation': assertion.metadata.trust_explanation,
+                'trust_value': assertion.metadata.trust_value
             }
         ).to_json()), 201
     except (ValueError, KeyError) as e:

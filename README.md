@@ -603,6 +603,6 @@ If you use this framework in your research, please cite:
 
 ## Acknowledgments
 
-- Based on the AI Trust Chain framework whitepaper
+- Based on the "AI Trust Chain" framework whitepaper Version 1.0 https://mossrake.com/ai-trust-chain
 - Inspired by challenges in enterprise AI adoption
 - Built for transparency and accountability in AI systems

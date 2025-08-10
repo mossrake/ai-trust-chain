@@ -64,6 +64,10 @@ coverage.xml
 *.cover
 .hypothesis/
 
+# Misc
+trust_chain.db
+trust_registry.json
+
 # Documentation
 docs/_build/
 docs/_static/

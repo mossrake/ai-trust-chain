@@ -31,17 +31,21 @@ def understand_trust_explanation(consumed_assertions: List[Dict], endpoint_type:
         return {
             "understanding": "Azure OpenAI not configured - using default interpretation",
             "materiality_adjustments": {},
-            "confidence_impact": 1.0
+            "confidence_impact": 1.0,
+            "trust_explanation": 'Operating normally based on sensor inputs'
         }
     
     # Build context from consumed assertions
     context = f"As a {endpoint_type} endpoint, I need to understand these inputs:\n\n"
     for assertion in consumed_assertions:
-        context += f"- Assertion {assertion['id']}:\n"
-        context += f"  Trust: {assertion.get('trust', 'unknown')}\n"
-        context += f"  Explanation: {assertion.get('explanation', 'none provided')}\n"
-        context += f"  Content: {json.dumps(assertion.get('content', {}))}\n\n"
+        #print( f'Assertion: {assertion}')
+        metadata = assertion #assertion['metadata']
+        context += f"- Assertion {metadata['id']}:\n"
+        context += f"  Trust: {metadata.get('trust_value')}\n"
+        context += f"  Explanation: {metadata.get('trust_explanation')}\n"
+        context += f"  Content: {json.dumps(metadata.get('content', {}))}\n\n"
     
+    print( f'Context: {context}' )
     # Call Azure OpenAI to understand the implications
     headers = {
         "Content-Type": "application/json",
@@ -50,11 +54,12 @@ def understand_trust_explanation(consumed_assertions: List[Dict], endpoint_type:
     
     prompt = f"""{context}
     Based on these inputs, provide:
-    1. A summary understanding of what these trust values mean for my operation
+    1. A summary understanding of what these trust values and explanations mean for my operation
     2. How I should adjust materiality for each input (0.0-1.0 scale)
     3. How this should impact my own confidence (multiplication factor)
+    4. A trust explanation describing the overall trust status
     
-    Respond in JSON format with keys: understanding, materiality_adjustments, confidence_impact"""
+    Respond in JSON format with keys: understanding, materiality_adjustments, confidence_impact, trust_explanation"""
     
     try:
         response = requests.post(
@@ -80,21 +85,24 @@ def understand_trust_explanation(consumed_assertions: List[Dict], endpoint_type:
                 return {
                     "understanding": llm_response,
                     "materiality_adjustments": {},
-                    "confidence_impact": 0.9
+                    "confidence_impact": 0.9,
+                    "trust_explanation": 'Processing with reduced confidence due to interpretation issues'
                 }
         else:
             print(f"⚠️  Azure OpenAI call failed: {response.status_code}")
             return {
                 "understanding": "Failed to get AI interpretation",
                 "materiality_adjustments": {},
-                "confidence_impact": 0.8
-            }
+                "confidence_impact": 0.8,
+                "trust_explanation": 'Processing with fallback logic due to AI unavailability'
+             }
     except Exception as e:
         print(f"⚠️  Error calling Azure OpenAI: {e}")
         return {
             "understanding": "Error in AI interpretation",
             "materiality_adjustments": {},
-            "confidence_impact": 0.8
+            "confidence_impact": 0.8,
+            "trust_explanation": 'Processing without AI understanding'
         }
 
 def get_assertion_details(assertion_id, token="user-token") -> Optional[Dict]:
@@ -168,7 +176,9 @@ def create_door_sensor_assertion(door_id, is_open, confidence=0.99, token="senso
                 "is_open": is_open,
                 "timestamp": datetime.utcnow().isoformat()
             },
-            "confidence": confidence
+            "confidence": confidence,
+            "trust_value": 1.0,  # Root sensor - provides its own trust
+            "trust_explanation": "Magnetic switch sensor functioning normally"
         }
     )
     
@@ -188,6 +198,7 @@ def create_sensor_assertion(sensor_id, temperature, confidence=0.98, token="sens
     """Create a sensor assertion"""
     print(f"\n📡 Creating sensor assertion ({sensor_id})...")
     
+    print( f'{sensor_id}')
     response = requests.post(
         f"{BASE_URL}/api/v1/assertions",
         headers={
@@ -203,7 +214,9 @@ def create_sensor_assertion(sensor_id, temperature, confidence=0.98, token="sens
                 "unit": "fahrenheit",
                 "timestamp": datetime.utcnow().isoformat()
             },
-            "confidence": confidence
+            "confidence": confidence,
+            "trust_value": 0.99,  # Root sensor - provides its own trust
+            "trust_explanation": "Temperature sensor calibrated and functioning normally"
         }
     )
     
@@ -226,15 +239,19 @@ def create_ml_assertion(sensor_ids, token="ml-token"):
     consumed_details = []
     for sid in sensor_ids:
         details = get_assertion_details(sid)
+        #print( f'{details}')
+  
         if details:
+            metadata = details['metadata']
             consumed_details.append({
                 "id": sid,
-                "trust": details.get("trust_value"),
-                "explanation": details.get("trust_explanation", "No explanation"),
+                "trust_value": metadata.get("trust_value"),
+                "trust_explanation": metadata.get("trust_explanation", "No explanation"),
                 "content": details.get("content", {})
             })
     
     # Use AI to understand the trust implications
+    #print( f'consumed datails {consumed_details}' )
     understanding = understand_trust_explanation(consumed_details, "ml_model")
     print(f"   AI Understanding: {understanding['understanding'][:100]}...")
     
@@ -249,6 +266,7 @@ def create_ml_assertion(sensor_ids, token="ml-token"):
     base_confidence = 0.85
     adjusted_confidence = base_confidence * understanding.get('confidence_impact', 1.0)
     
+    # DO NOT send trust_value for ML assertions - server will calculate via propagation
     response = requests.post(
         f"{BASE_URL}/api/v1/assertions",
         headers={
@@ -264,9 +282,10 @@ def create_ml_assertion(sensor_ids, token="ml-token"):
                 "probability": 0.82,
                 "timestamp": datetime.utcnow().isoformat(),
                 "analysis": "Based on readings from multiple temperature sensors",
-                "ai_understanding": understanding['understanding']
             },
             "confidence": adjusted_confidence,
+            "trust_value": 0,  # Send 0 to trigger propagation calculation
+            "trust_explanation": understanding['trust_explanation'],
             "consumed_assertions": sensor_ids,
             "consumed_assertion_materiality": materiality
         }
@@ -274,12 +293,12 @@ def create_ml_assertion(sensor_ids, token="ml-token"):
     
     if response.status_code == 201:
         data = response.json()["data"]
+        print( f'ML data {data}')
         print(f"✅ ML assertion created")
         print(f"   ID: {data['assertion_id']}")
-        print(f"   Trust: {data.get('trust_value', 'N/A')}")
+        print(f"   Trust: {data.get('trust_value', 'N/A')} (calculated by propagation)")
         print(f"   Confidence: {data.get('confidence_value', 'N/A')}")
-        if "trust_explanation" in data:
-            print(f"   Explanation: {data['trust_explanation']}")
+        print(f"   Explanation: {data['trust_explanation']}")
         return data['assertion_id']
     else:
         print(f"❌ Failed: {response.status_code} - {response.text}")
@@ -294,19 +313,23 @@ def create_llm_assertion(ml_id, door_id, token="llm-token"):
     
     ml_details = get_assertion_details(ml_id)
     if ml_details:
+        metadata = ml_details.get('metadata', {})  # Get metadata field
+
         consumed_details.append({
             "id": ml_id,
-            "trust": ml_details.get("trust_value"),
-            "explanation": ml_details.get("trust_explanation", "No explanation"),
+            "trust_value": metadata.get("trust_value"),
+            "trust_explanation": metadata.get("trust_explanation", "No explanation"),
             "content": ml_details.get("content", {})
         })
     
     door_details = get_assertion_details(door_id)
     if door_details:
+        metadata = door_details.get('metadata', {})  # Get metadata field
+        
         consumed_details.append({
             "id": door_id,
-            "trust": door_details.get("trust_value"),
-            "explanation": door_details.get("trust_explanation", "No explanation"),
+            "trust_value": metadata.get("trust_value"),
+            "trust_explanation": metadata.get("trust_explanation", "No explanation"),
             "content": door_details.get("content", {})
         })
     
@@ -327,7 +350,11 @@ def create_llm_assertion(ml_id, door_id, token="llm-token"):
     else:
         recommendation = "Schedule maintenance within 48 hours; ensure refrigerator door is properly sealed"
         risk_level = "medium"
-    
+
+    print( f'recommendation {recommendation}' )
+    print( f'trying the server ...')
+     
+    # DO NOT send trust_value for LLM assertions - server will calculate via propagation
     response = requests.post(
         f"{BASE_URL}/api/v1/assertions",
         headers={
@@ -342,23 +369,23 @@ def create_llm_assertion(ml_id, door_id, token="llm-token"):
                 "recommendation": recommendation,
                 "risk_level": risk_level,
                 "analysis": "Based on temperature sensors, ML predictions, and door status",
-                "trust_synthesis": understanding['understanding'],
                 "timestamp": datetime.utcnow().isoformat()
             },
             "confidence": 0.88 * understanding.get('confidence_impact', 1.0),
+            "trust_value": 0,  # Send 0 to trigger propagation calculation
+            "trust_explanation": understanding['trust_explanation'],
             "consumed_assertions": [ml_id, door_id],
             "consumed_assertion_materiality": materiality
         }
     )
-    
+    print( f'status code: {response.status_code}')
     if response.status_code == 201:
         data = response.json()["data"]
         print(f"✅ LLM assertion created")
         print(f"   ID: {data['assertion_id']}")
-        print(f"   Trust: {data.get('trust_value', 'N/A')}")
+        print(f"   Trust: {data.get('trust_value', 'N/A')} (calculated by propagation)")
         print(f"   Confidence: {data.get('confidence_value', 'N/A')}")
-        if "trust_explanation" in data:
-            print(f"   Explanation: {data['trust_explanation']}")
+        print(f"   Explanation: {data['trust_explanation']}")
         return data['assertion_id']
     else:
         print(f"❌ Failed: {response.status_code} - {response.text}")
@@ -481,10 +508,9 @@ def main():
     # Step 2: Set trust ceilings (optional)
     print("\n2️⃣  SETTING TRUST CEILINGS")
     print("-"*40)
-    # Uncomment to set trust ceilings
-    # set_trust_ceiling("sensor.temperature.honeywell_t7771a", 0.90)
-    # set_trust_ceiling("ml_model.predictive", 0.85)
-    # set_trust_ceiling("llm.gpt4", 0.80)
+    set_trust_ceiling("sensor.temperature.honeywell_t7771a", 0.90)
+    set_trust_ceiling("ml_model.predictive", 0.85)
+    set_trust_ceiling("llm.gpt4", 0.80)
     
     # Step 3: Create assertion chain
     print("\n3️⃣  CREATING ASSERTION CHAIN")

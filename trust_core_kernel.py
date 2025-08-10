@@ -145,7 +145,7 @@ class TrustRule:
     
     def validate(self) -> bool:
         """Validate rule parameters"""
-        return 0.0 <= self.max_trust_ceiling <= 1.0
+        return 0.0 <= self.max_trust_ceiling <= 0.99
 
 class TrustAuthority:
     """Centralized trust authority managing trust registry and propagation rules"""
@@ -191,7 +191,7 @@ class TrustAuthority:
     
     def get_trust_ceiling(self, endpoint_class: str) -> float:
         """Get maximum trust ceiling for an endpoint class"""
-        return self.trust_registry.get(endpoint_class, 0.5)  # Default to 0.5
+        return self.trust_registry.get(endpoint_class, 1.0)  # Default to 1.0
     
     def add_propagation_rule(self, rule: TrustRule) -> None:
         """Add or update a trust propagation rule"""
@@ -498,7 +498,9 @@ class TrustKernel:
                         endpoint_class: str,
                         endpoint_type: EndpointType,
                         content: Any,
-                        confidence: float,
+                        confidence: float, 
+                        trust_value: float = 0.,
+                        trust_explanation = None,
                         consumed_assertion_ids: List[str] = None,
                         limitations: Dict[str, Any] = None) -> Assertion:
         """
@@ -510,6 +512,7 @@ class TrustKernel:
             endpoint_type: Type of endpoint (sensor, ml_model, llm, etc.)
             content: The actual assertion content/data
             confidence: Self-reported confidence (0.0-1.0)
+            trust_value: Optional trust value - ONLY used for root assertions without consumed assertions
             consumed_assertion_ids: List of assertion IDs this assertion is based on
             limitations: Any limitations or caveats about this assertion
         
@@ -521,11 +524,13 @@ class TrustKernel:
         """
         consumed_assertion_ids = consumed_assertion_ids or []
         limitations = limitations or {}
-        
+        provenance_chain = []
+
         # Calculate trust based on consumed assertions
         # Note: Materiality is determined internally by the endpoint
         # This reference implementation uses equal weights for simplicity
         consumed_trusts = []
+
         for assertion_id in consumed_assertion_ids:
             consumed = self.get_assertion(assertion_id)
             if consumed and consumed.metadata:
@@ -536,8 +541,15 @@ class TrustKernel:
                 materiality = 1.0  # Equal weight for reference implementation
                 consumed_trusts.append((consumed.metadata.trust_value, materiality))
                 
+                # Build provenance chain
+                if consumed.metadata.provenance:
+                    # Merge provenance chains from consumed assertions
+                    for endpoint in consumed.metadata.provenance:
+                        if endpoint not in provenance_chain:
+                            provenance_chain.append(endpoint)
+
                 # STUB: Sophisticated endpoints with AI (LLM) access can INTERPRET explanations
-                # from consumed assertions to make trust adjustments:
+                # from consumed assertions to make trust and materiality adjustments:
                 # 
                 # if consumed.metadata.trust_explanation:
                 #     # Use AI to understand if "sensor uncalibrated for 3 years" matters
@@ -546,18 +558,28 @@ class TrustKernel:
                 #         adjusted_trust = ...
                 #         # Override trust if context makes it more/less relevant
                 #         consumed_trusts[-1] = (adjusted_trust, materiality)
+
+        # Add current endpoint to the chain
+        if endpoint_class not in provenance_chain:
+            provenance_chain.append(endpoint_class)
+       
+        # Calculate propagated trust
+        if consumed_trusts:
+            # When there are consumed assertions, use propagation rules
+            trust_value = self.authority.calculate_propagated_trust(
+                consumed_trusts, endpoint_type, endpoint_class
+            )
+        elif trust_value == 0.:
+            # No consumed assertions and no trust provided, use ceiling
+            trust_value = self.authority.get_trust_ceiling(endpoint_class)
         
-        trust_value = self.authority.calculate_propagated_trust(
-            consumed_trusts, endpoint_type, endpoint_class
-        )
-        
-        # Create metadata wrapper with trust explanation if endpoint can generate it
-        trust_explanation = None
-        # STUB: Endpoints generate explanations using templates
-        # Simple example with templates:
-        # if trust_value < 0.5:
-        #     trust_explanation = f"Trust is low ({trust_value:.2f}) due to upstream data quality issues"
-        # 
+        # Create metadata wrapper with trust explanation as appropriate
+        if trust_explanation is None:
+            trust_explanation = 'ok'
+        # STUB: Endpoints generate explanations
+        # Simple example:
+        # if calculated_trust < 0.5:
+        #     trust_explanation = f"Trust is low ({calculated_trust:.2f}) due to upstream data quality issues"
         
         metadata = TrustMetadata(
             trust_value=trust_value,
@@ -568,7 +590,7 @@ class TrustKernel:
             endpoint_type=endpoint_type,
             endpoint_class=endpoint_class,
             timestamp=time.time(),
-            provenance=[endpoint_class],
+            provenance=provenance_chain,
             limitations=limitations
         )
         
