@@ -2,7 +2,18 @@
 """
 AI Trust Chain REST API Client with AI Understanding
 Script that creates assertions and uses Azure OpenAI to understand trust explanations
-Usage: python trust_chain_client.py
+Usage: python trust_chain_client.pyCopyright (C) 2025 Mossrake Group, LLC
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This module provides RESTful API endpoints for trust management, administration,
+and assertion processing with pass-through authentication.
+
+Based on the AI Trust Chain Framework designed by Mossrake Group, LLC.
+The framework design and concepts are proprietary intellectual property
 """
 
 import requests
