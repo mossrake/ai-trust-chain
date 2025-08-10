@@ -32,18 +32,17 @@ def understand_trust_explanation(consumed_assertions: List[Dict], endpoint_type:
             "understanding": "Azure OpenAI not configured - using default interpretation",
             "materiality_adjustments": {},
             "confidence_impact": 1.0,
-            "trust_explanation": 'Operating normally based on sensor inputs'
+            "trust_explanation": 'Operation nominal'
         }
     
     # Build context from consumed assertions
     context = f"As a {endpoint_type} endpoint, I need to understand these inputs:\n\n"
-    for assertion in consumed_assertions:
-        #print( f'Assertion: {assertion}')
-        metadata = assertion #assertion['metadata']
-        context += f"- Assertion {metadata['id']}:\n"
-        context += f"  Trust: {metadata.get('trust_value')}\n"
-        context += f"  Explanation: {metadata.get('trust_explanation')}\n"
-        context += f"  Content: {json.dumps(metadata.get('content', {}))}\n\n"
+    for consumed_details in consumed_assertions:
+        #print( f'Assertion: {consumed_details}')
+        context += f"- Assertion {consumed_details['id']}:\n"
+        context += f"  Trust: {consumed_details.get('trust_value')}\n"
+        context += f"  Explanation: {consumed_details.get('trust_explanation')}\n"
+        context += f"  Content: {json.dumps(consumed_details.get('content', {}))}\n\n"
     
     print( f'Context: {context}' )
     # Call Azure OpenAI to understand the implications
@@ -335,7 +334,7 @@ def create_llm_assertion(ml_id, door_id, token="llm-token"):
     
     # Use AI to understand and synthesize all inputs
     understanding = understand_trust_explanation(consumed_details, "llm")
-    print(f"   AI Synthesis: {understanding['understanding'][:100]}...")
+    print(f"   AI Synthesis: {understanding['understanding']}...")
     
     # Build intelligent materiality based on understanding
     materiality = {
@@ -351,7 +350,7 @@ def create_llm_assertion(ml_id, door_id, token="llm-token"):
         recommendation = "Schedule maintenance within 48 hours; ensure refrigerator door is properly sealed"
         risk_level = "medium"
 
-    print( f'recommendation {recommendation}' )
+    print( f'***recommendation***\n{recommendation}\n' )
     print( f'trying the server ...')
      
     # DO NOT send trust_value for LLM assertions - server will calculate via propagation
