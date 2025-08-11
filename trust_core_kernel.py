@@ -516,11 +516,13 @@ class TrustKernel:
             consumed_assertion_ids: List of assertion IDs this assertion is based on
             limitations: Any limitations or caveats about this assertion
         
-        Note: Sophisticated endpoints may use AI (LLMs) to INTERPRET trust explanations
-        from consumed assertions and adjust trust accordingly. LLMs are NOT required
-        to generate assertions or explanations - simple templates can generate explanations.
-        LLMs may be needed when an endpoint wants to understand and act on explanations
-        from consumed assertions.
+        Note: 
+        
+        Sophisticated endpoints may use an AI (SLM or LLM) or other logic to INTERPRET trust 
+        explanations from consumed assertions and adjust trust accordingly. 
+        
+        An AI is NOT required to GENERATE assertions / trust explanations.
+
         """
         consumed_assertion_ids = consumed_assertion_ids or []
         limitations = limitations or {}
@@ -548,7 +550,7 @@ class TrustKernel:
                         if endpoint not in provenance_chain:
                             provenance_chain.append(endpoint)
 
-                # STUB: Sophisticated endpoints with AI (LLM) access can INTERPRET explanations
+                # STUB: Sophisticated endpoints with AI (LLM or SLM) access can INTERPRET explanations
                 # from consumed assertions to make trust and materiality adjustments:
                 # 
                 # if consumed.metadata.trust_explanation:
@@ -573,9 +575,10 @@ class TrustKernel:
             # No consumed assertions and no trust provided, use ceiling
             trust_value = self.authority.get_trust_ceiling(endpoint_class)
         
-        # Create metadata wrapper with trust explanation as appropriate
+        # Generate trust explanation as appropriate
         if trust_explanation is None:
             trust_explanation = 'ok'
+        
         # STUB: Endpoints generate explanations
         # Simple example:
         # if calculated_trust < 0.5:
