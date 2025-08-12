@@ -42,6 +42,9 @@ The AI Trust Chain framework delegates trust explanation interpretation to indiv
 
 4. **Domain Expertise**: Endpoints best understand how trust issues in their inputs affect their outputs.
 
+#### Implementation Status
+**Note**: The AI interpretation pattern is demonstrated in code comments but not fully implemented in this reference version. Endpoints currently provide static explanations. The framework is designed to support AI-powered interpretation when integrated with your preferred LLM service.
+
 #### Implementation Pattern
 
 Endpoints that need to understand trust explanations should:
@@ -68,7 +71,8 @@ def create_assertion_with_understanding(consumed_assertions):
     return create_assertion(
         content=process_data(),
         materiality=materiality,
-        confidence=adjusted_confidence(understanding)
+        confidence=adjusted_confidence(understanding),
+        trust_explanation=synthesize_explanation(understanding)
     )
 ```
 
@@ -79,7 +83,8 @@ This approach keeps the kernel lightweight while enabling sophisticated trust co
 ### Prerequisites
 
 - Python 3.8+
-- PostgreSQL 12+ (or SQLite for development)
+- SQLite (included with Python)
+- PostgreSQL 12+ (optional, for production)
 - Redis (optional, for caching)
 
 ### Installation
@@ -121,14 +126,16 @@ curl -X POST http://localhost:5000/api/v1/assertions \
     "endpoint_class": "sensor.temperature.honeywell_t7771a",
     "endpoint_type": "sensor",
     "content": {"temperature": 72.5, "unit": "fahrenheit"},
-    "confidence": 0.95
+    "confidence": 0.95,
+    "trust_explanation": "Sensor operating within normal parameters, last calibrated 30 days ago"
   }'
 ```
 
 ### 4. View the evidence chain
 ```bash
-curl -X GET http://localhost:5000/api/v1/assertions/{id}/evidence \
+curl -X GET "http://localhost:5000/api/v1/assertions/{id}/evidence" \
   -H "Authorization: Bearer user-token"
+```
 
 ## API Documentation
 
@@ -201,7 +208,8 @@ curl -X POST http://localhost:5000/api/v1/assertions \
     "endpoint_class": "sensor.temperature.honeywell_t7771a",
     "endpoint_type": "sensor",
     "content": {"temperature": 75.2},
-    "confidence": 0.98
+    "confidence": 0.98,
+    "trust_explanation": "Sensor functioning normally, recent calibration confirms accuracy"
   }'
 ```
 
@@ -217,8 +225,11 @@ curl -X POST http://localhost:5000/api/v1/assertions \
     "endpoint_type": "ml_model",
     "content": {"prediction": "maintenance_required", "probability": 0.82},
     "confidence": 0.85,
+    "trust_explanation": "Model confidence based on single temperature input, would benefit from additional sensor data",
     "consumed_assertions": ["SENSOR_ASSERTION_ID_HERE"],
-    "consumed_assertion_materiality": {"SENSOR_ASSERTION_ID_HERE": 0.9}
+    "consumed_assertion_materiality": {
+      "SENSOR_ASSERTION_ID_HERE": [0.9, true]
+    }
   }'
 ```
 
@@ -295,7 +306,8 @@ sensor_data = {
     "endpoint_class": "sensor.temperature.honeywell_t7771a",
     "endpoint_type": "sensor",
     "content": {"temperature": 75.2},
-    "confidence": 0.98
+    "confidence": 0.98,
+    "trust_explanation": "Sensor functioning normally, recent calibration confirms accuracy"
 }
 
 sensor_response = requests.post(
@@ -326,9 +338,10 @@ ml_data = {
         "probability": 0.82
     },
     "confidence": 0.85,
+    "trust_explanation": "Model confidence based on single temperature input, would benefit from additional sensor data",
     "consumed_assertions": [sensor_id],
     "consumed_assertion_materiality": {
-        sensor_id: 0.9  # High materiality
+        sensor_id: (0.9, True)  # Tuple format: (weight, affects_trust)
     }
 }
 
@@ -341,8 +354,8 @@ ml_response = requests.post(
 if ml_response.status_code == 201:
     ml_result = ml_response.json()["data"]
     print(f"Created ML assertion: {ml_result['assertion_id']}")
-    if "trust_explanation" in ml_result:
-        print(f"Trust explanation: {ml_result['trust_explanation']}")
+    print(f"Trust value: {ml_result['trust_value']}")
+    print(f"Trust explanation: {ml_result['trust_explanation']}")
 else:
     print(f"Error creating ML assertion: {ml_response.text}")
 ```
@@ -372,13 +385,16 @@ if response.status_code == 200:
     summary = evidence["summary"]
     print(f"Chain depth: {summary['chain_depth']}")
     print(f"Total assertions: {summary['total_assertions']}")
+    print(f"Trust inputs: {summary['trust_inputs']}")
+    print(f"Context inputs: {summary['context_inputs']}")
     
     # Show weakest link in the chain
-    weakest = summary["weakest_link"]
-    print(f"\nWeakest link:")
-    print(f"  Endpoint: {weakest['endpoint_id']}")
-    print(f"  Trust: {weakest['trust_value']}")
-    print(f"  Issue: {weakest['explanation']}")
+    if summary.get("weakest_link"):
+        weakest = summary["weakest_link"]
+        print(f"\nWeakest link:")
+        print(f"  Endpoint: {weakest['endpoint_id']}")
+        print(f"  Trust: {weakest['trust_value']}")
+        print(f"  Issue: {weakest.get('explanation', 'No explanation provided')}")
     
     # Display recommendation
     print(f"\nRecommendation: {summary['recommendation']}")
@@ -440,6 +456,54 @@ else:
     print(response.text)
 ```
 
+#### Working with Materiality Specifications
+
+```python
+import requests
+
+base_url = "http://localhost:5000"
+
+# Create an LLM assertion that consumes multiple inputs with different materiality
+llm_data = {
+    "endpoint_id": "llm-analyzer-01",
+    "endpoint_class": "llm.gpt4",
+    "endpoint_type": "llm",
+    "content": {
+        "recommendation": "Schedule preventive maintenance",
+        "reasoning": "Multiple indicators suggest degradation"
+    },
+    "confidence": 0.78,
+    "trust_explanation": "Analysis based on sensor data with varying reliability, temperature sensor uncalibrated",
+    "consumed_assertions": ["sensor-001", "sensor-002", "ml-pred-001", "debug-log-001"],
+    "consumed_assertion_materiality": {
+        "sensor-001": (0.4, True),   # 40% weight, affects trust
+        "sensor-002": (0.3, True),   # 30% weight, affects trust  
+        "ml-pred-001": (0.3, True),  # 30% weight, affects trust
+        "debug-log-001": (0.0, False) # Context only, doesn't affect trust
+    }
+}
+
+headers = {
+    "Authorization": "Bearer llm-token",
+    "Content-Type": "application/json"
+}
+
+response = requests.post(
+    f"{base_url}/api/v1/assertions",
+    json=llm_data,
+    headers=headers
+)
+
+if response.status_code == 201:
+    result = response.json()["data"]
+    print(f"Created LLM assertion: {result['assertion_id']}")
+    print(f"Trust value: {result['trust_value']}")
+    print(f"Trust inputs considered: {result.get('trust_input_count', 'N/A')}")
+    print(f"Context inputs: {result.get('context_input_count', 'N/A')}")
+else:
+    print(f"Error: {response.text}")
+```
+
 ## Response Examples
 
 ### Successful Assertion Creation Response
@@ -453,6 +517,8 @@ else:
     "confidence_value": 0.90,
     "temporal_validity": 0.95,
     "trust_explanation": "Trust is moderate (0.75) due to temperature sensor calibration being 6 months old, though recent readings show good consistency",
+    "trust_input_count": 2,
+    "context_input_count": 1,
     "timestamp": "2025-01-15T10:30:00Z"
   }
 }
@@ -470,7 +536,9 @@ else:
       "endpoint_class": "llm.gpt4",
       "trust_value": 0.68,
       "confidence_value": 0.85,
-      "trust_explanation": "Trust reduced due to stale temperature data",
+      "trust_explanation": "Trust reduced due to stale temperature data from uncalibrated sensor",
+      "trust_input_count": 2,
+      "context_input_count": 1,
       "content": {
         "recommendation": "Schedule maintenance within 48 hours",
         "risk_level": "medium"
@@ -482,6 +550,8 @@ else:
           "endpoint_class": "ml_model.predictive",
           "trust_value": 0.70,
           "confidence_value": 0.82,
+          "materiality_weight": 0.6,
+          "affects_trust": true,
           "content": {
             "prediction": "maintenance_required",
             "probability": 0.82
@@ -493,6 +563,8 @@ else:
               "endpoint_class": "sensor.temperature.honeywell_t7771a",
               "trust_value": 0.70,
               "confidence_value": 0.95,
+              "materiality_weight": 1.0,
+              "affects_trust": true,
               "trust_explanation": "Sensor uncalibrated for 6 months",
               "content": {
                 "temperature": 75.2
@@ -500,12 +572,23 @@ else:
               "consumed_assertions": []
             }
           ]
+        },
+        {
+          "assertion_id": "debug-log-001",
+          "endpoint_id": "system-logger",
+          "materiality_weight": 0.0,
+          "affects_trust": false,
+          "content": {
+            "log": "System diagnostics normal"
+          }
         }
       ]
     },
     "summary": {
       "chain_depth": 3,
-      "total_assertions": 3,
+      "total_assertions": 4,
+      "trust_inputs": 2,
+      "context_inputs": 1,
       "weakest_link": {
         "endpoint_id": "temp-sensor-01",
         "trust_value": 0.70,
@@ -547,36 +630,35 @@ else:
 }
 ```
 
-
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────┐
 │                  Endpoints                       │
 │  (Sensors, APIs, ML Models, LLMs)               │
 │  - Create assertions                             │
-│  - Understand trust explanations                 │
-│  - Apply materiality                             │
-└─────────────────────────────────────────────────┘
+│  - Provide trust explanations                    │
+│  - Determine materiality                         │
+└──────────────────────────────────────────────────┘
                         ↓
-┌─────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────┐
 │              Trust Kernel                        │
 │  - Calculate trust propagation                   │
 │  - Apply trust ceilings                          │
-│  - Generate basic explanations                   │
-└─────────────────────────────────────────────────┘
+│  - Track materiality specifications              │
+└──────────────────────────────────────────────────┘
                         ↓
-┌─────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────┐
 │           Blockchain Ledger                      │
 │  - Immutable assertion storage                   │
 │  - Cryptographic verification                    │
 │  - Complete audit trail                          │
-└─────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────┘
 ```
 
 ## Contributing
 
-At this time we are not accepting contributions.  In the future, please read [CONTRIBUTING.md](CONTRIBUTING.md) for details on our code of conduct and the process for submitting pull requests.
+At this time we are not accepting contributions. In the future, please read [CONTRIBUTING.md](CONTRIBUTING.md) for details on our code of conduct and the process for submitting pull requests.
 
 ## License
 
@@ -599,7 +681,7 @@ If you use this framework in your research, please cite:
 
 - Documentation: [https://mossrake.com/ai-trust-chain](https://mossrake.com/ai-trust-chain)
 - Issues: [GitHub Issues](https://github.com/mossrake/ai-trust-chain/issues)
-- ##Discussion: [GitHub Discussions](https://github.com/mossrake/ai-trust-chain/discussions)
+- Discussion: [GitHub Discussions](https://github.com/mossrake/ai-trust-chain/discussions)
 
 ## Acknowledgments
 
