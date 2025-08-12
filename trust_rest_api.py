@@ -1,5 +1,5 @@
 """
-AI Trust Chain Framework - REST API Server
+AI Trust Chain Framework - REST API Server (Fixed)
 Copyright (C) 2025 Mossrake Group, LLC
 
 This program is free software: you can redistribute it and/or modify
@@ -10,9 +10,12 @@ by the Free Software Foundation, either version 3 of the License, or
 This module provides RESTful API endpoints for trust management, administration,
 and assertion processing with pass-through authentication.
 
+IMPORTANT CHANGES:
+- Removed trust_value from required fields (it's calculated, not provided)
+- Added support for materiality specifications as (weight, apply_to_trust) tuples
+- Fixed trust_explanation to be optional
+
 Based on the AI Trust Chain Framework designed by Mossrake Group, LLC.
-The framework design and concepts are proprietary intellectual property
-of Mossrake Group, LLC. This implementation is released under AGPL-3.0.
 """
 
 import json
@@ -20,7 +23,7 @@ import os
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from functools import wraps
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
@@ -28,7 +31,8 @@ from werkzeug.exceptions import BadRequest, Unauthorized, NotFound
 
 from trust_core_kernel import (
     TrustAuthority, BlockchainAuditTrail, TrustKernel,
-    TrustRule, Assertion, TrustMetadata, EndpointType
+    TrustRule, Assertion, TrustMetadata, EndpointType,
+    MaterialitySpec
 )
 
 # Initialize Flask app
@@ -225,50 +229,79 @@ def create_assertion():
     - endpoint_type: Type of endpoint (sensor, ml_model, llm, etc.)
     - content: The assertion data
     - confidence: Self-reported confidence (0.0-1.0)
-    - trust_value: (0.0-1.0)
-    - trust_explanation: (optional)
+    - trust_explanation: REQUIRED explanation of trust status from the endpoint
     - consumed_assertions: List of assertion IDs this is based on (optional)
+    - consumed_assertion_materiality: Dict of assertion_id -> [weight, apply_to_trust] (optional)
     - limitations: Any limitations or caveats (optional)
+    - temporal_validity: Optional temporal validity (0.0-1.0)
     
-    Note: Materiality of consumed assertions is determined internally
-    by the endpoint based on its logic, not passed via API.
+    Note: 
+    - Trust value is NEVER provided - it's calculated by the framework
+    - Trust explanation must ALWAYS be provided by the endpoint
+    - Materiality is specified as [weight, apply_to_trust] tuples
+    
+    Example:
+    {
+        "endpoint_id": "ml-model-01",
+        "endpoint_class": "ml.predictor",
+        "endpoint_type": "ml_model",
+        "content": {"prediction": "failure"},
+        "confidence": 0.85,
+        "consumed_assertions": ["sensor1", "sensor2", "debug"],
+        "consumed_assertion_materiality": {
+            "sensor1": [0.7, true],
+            "sensor2": [0.3, true],
+            "debug": [0.0, false]
+        }
+    }
     """
     data = request.get_json()
-
-    print( f'!!!!!assertion: {data}')
     
-    required_fields = ['endpoint_id', 'endpoint_class', 'endpoint_type', 'content', 
-        'confidence','trust_value', 'trust_explanation']
+    print(f'Received assertion request: {data}')
     
-    #if not all(field in data for field in required_fields):
-    missing_fields = []
-    for field in required_fields :
-        if field not in data : 
-            missing_fields.append(field)
-            break
+    # Required fields including trust_explanation
+    required_fields = ['endpoint_id', 'endpoint_class', 'endpoint_type', 'content', 'confidence', 'trust_explanation']
     
-    if len(missing_fields) > 0 :
+    missing_fields = [field for field in required_fields if field not in data]
+    
+    if missing_fields:
         return jsonify(ApiResponse(
             success=False,
-            error=f"Missing fields: {missing_fields}"
+            error=f"Missing required fields: {missing_fields}"
         ).to_json()), 400
     
     try:
         endpoint_type = EndpointType(data['endpoint_type'])
         
+        # Convert materiality from list format to tuple format
+        consumed_materiality = {}
+        if 'consumed_assertion_materiality' in data:
+            for assertion_id, spec in data['consumed_assertion_materiality'].items():
+                if isinstance(spec, list) and len(spec) == 2:
+                    # Convert list to tuple
+                    consumed_materiality[assertion_id] = (float(spec[0]), bool(spec[1]))
+                elif isinstance(spec, (int, float)):
+                    # Legacy format - single number means weight with apply_to_trust=True
+                    consumed_materiality[assertion_id] = (float(spec), True)
+                else:
+                    # Default to equal weight, affects trust
+                    consumed_materiality[assertion_id] = (1.0, True)
+        
+        # Create assertion - trust will be calculated automatically
         assertion = trust_kernel.create_assertion(
             endpoint_id=data['endpoint_id'],
             endpoint_class=data['endpoint_class'],
             endpoint_type=endpoint_type,
             content=data['content'],
-            trust_explanation = data['trust_explanation'],
-            trust_value = data['trust_value'],
             confidence=float(data['confidence']),
+            trust_explanation=data['trust_explanation'],  # Required from endpoint
             consumed_assertion_ids=data.get('consumed_assertions', []),
-            limitations=data.get('limitations', {})
+            consumed_assertion_materiality=consumed_materiality,
+            limitations=data.get('limitations', {}),
+            temporal_validity=data.get('temporal_validity')
         )
-
-        print( f'assertion: {assertion}')
+        
+        print(f'Created assertion: {assertion.id} with trust: {assertion.metadata.trust_value}')
         
         return jsonify(ApiResponse(
             success=True,
@@ -278,10 +311,13 @@ def create_assertion():
                 'confidence_value': assertion.metadata.confidence_value,
                 'temporal_validity': assertion.metadata.temporal_validity,
                 'trust_explanation': assertion.metadata.trust_explanation,
-                'trust_value': assertion.metadata.trust_value
+                'trust_input_count': assertion.metadata.trust_input_count,
+                'context_input_count': assertion.metadata.context_input_count
             }
         ).to_json()), 201
     except (ValueError, KeyError) as e:
+        import traceback
+        traceback.print_exc()
         return jsonify(ApiResponse(
             success=False,
             error=str(e)
@@ -299,9 +335,20 @@ def get_assertion(assertion_id):
             error=f"Assertion {assertion_id} not found"
         ).to_json()), 404
     
+    # Convert materiality tuples to lists for JSON serialization
+    assertion_dict = assertion.to_dict()
+    if 'consumed_assertion_materiality' in assertion_dict:
+        mat_dict = {}
+        for aid, spec in assertion_dict['consumed_assertion_materiality'].items():
+            if isinstance(spec, tuple):
+                mat_dict[aid] = list(spec)  # Convert tuple to list for JSON
+            else:
+                mat_dict[aid] = spec
+        assertion_dict['consumed_assertion_materiality'] = mat_dict
+    
     return jsonify(ApiResponse(
         success=True,
-        data=assertion.to_dict()
+        data=assertion_dict
     ).to_json())
 
 @app.route('/api/v1/assertions/<assertion_id>/provenance', methods=['GET'])
@@ -466,6 +513,7 @@ def initialize_system():
     # Set default trust ceilings
     default_ceilings = data.get('default_ceilings', {
         'sensor.temperature.honeywell_t7771a': 0.85,
+        'sensor.door.magnetic_switch': 0.95,
         'sensor.generic': 0.7,
         'api.external': 0.6,
         'ml_model.predictive': 0.75,

@@ -1,5 +1,5 @@
 """
-AI Trust Chain Framework - Core Trust Kernel
+AI Trust Chain Framework - Core Trust Kernel (Fixed with Tuple Materiality)
 Copyright (C) 2025 Mossrake Group, LLC
 
 This program is free software: you can redistribute it and/or modify
@@ -13,12 +13,21 @@ with blockchain-based immutable audit trails stored on disk.
 Based on the AI Trust Chain Framework designed by Mossrake Group, LLC.
 The framework design and concepts are proprietary intellectual property
 of Mossrake Group, LLC. This implementation is released under AGPL-3.0.
+
+IMPORTANT: 
+- Trust values are NEVER set by endpoints. They are calculated based on:
+  * Trust ceilings (for root assertions)
+  * Propagation rules (for derived assertions)
+- Materiality is a tuple (weight, apply_to_trust) where:
+  * weight: relative importance (0.0-1.0)
+  * apply_to_trust: whether this input affects trust propagation
 """
 
 import hashlib
 import json
 import time
 import uuid
+import warnings
 from dataclasses import dataclass, field, asdict as _asdict
 from datetime import datetime
 from enum import Enum
@@ -29,6 +38,9 @@ import threading
 
 # Thread-local storage for database connections
 _thread_local = threading.local()
+
+# Type alias for materiality specification
+MaterialitySpec = Tuple[float, bool]  # (weight, apply_to_trust)
 
 def asdict(obj):
     """Custom asdict that converts Enums to their values"""
@@ -49,6 +61,7 @@ class EndpointType(Enum):
     ML_MODEL = "ml_model"
     LLM = "llm"
     PROCESSOR = "processor"
+    DATA_SOURCE = "data_source"
 
 @dataclass
 class TrustMetadata:
@@ -58,10 +71,12 @@ class TrustMetadata:
     Trust is represented as a single composite value, with optional natural language
     explanation that may describe the various dimensions that contributed to the trust
     assessment (calibration status, environmental conditions, etc.)
+    
+    IMPORTANT: trust_value is ALWAYS calculated by the framework, never set directly
     """
     # Core values
-    trust_value: float  # 0.0 to 1.0 - composite trust value (incorporates all factors)
-    confidence_value: float  # 0.0 to 1.0 - self-reported certainty
+    trust_value: float  # 0.0 to 1.0 - FRAMEWORK CALCULATED (never set by endpoints)
+    confidence_value: float  # 0.0 to 1.0 - self-reported certainty from endpoint
     trust_explanation: Optional[str] = None  # Natural language explanation of trust factors
     
     # Common dimension - universally useful across all endpoint types
@@ -73,6 +88,10 @@ class TrustMetadata:
     endpoint_class: str = ""
     timestamp: float = field(default_factory=time.time)  # When assertion was created
     provenance: List[str] = field(default_factory=list)  # Chain of endpoint classes
+    
+    # Trust calculation details
+    trust_input_count: int = 0  # Number of assertions that affected trust
+    context_input_count: int = 0  # Number of assertions used for context only
     
     # Optional context
     limitations: Dict[str, Any] = field(default_factory=dict)  # Known limitations
@@ -92,6 +111,7 @@ class Assertion:
     content: Any = None
     metadata: TrustMetadata = None
     consumed_assertions: List[str] = field(default_factory=list)
+    consumed_assertion_materiality: Dict[str, MaterialitySpec] = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
     
     def to_dict(self) -> Dict:
@@ -102,6 +122,7 @@ class Assertion:
             'content': self.content,
             'metadata': asdict(self.metadata) if self.metadata else None,
             'consumed_assertions': self.consumed_assertions,
+            'consumed_assertion_materiality': self.consumed_assertion_materiality,
             'timestamp': self.timestamp
         }
 
@@ -175,9 +196,7 @@ class TrustAuthority:
                 rule_id: asdict(rule) for rule_id, rule in self.propagation_rules.items()
             }
         }
-        # Convert EndpointType enums to strings for JSON serialization
-        for rule_data in data['propagation_rules'].values():
-            rule_data['endpoint_type'] = rule_data['endpoint_type'].value
+        # Note: asdict already converts EndpointType enums to strings, so no need to convert again
         
         with open(self.registry_path, 'w') as f:
             json.dump(data, f, indent=2)
@@ -200,49 +219,70 @@ class TrustAuthority:
         self.propagation_rules[rule.rule_id] = rule
         self.save_registry()
     
+    def get_rule_for_endpoint_type(self, endpoint_type: EndpointType) -> Optional[TrustRule]:
+        """Get the propagation rule for a specific endpoint type"""
+        for rule in self.propagation_rules.values():
+            if rule.endpoint_type == endpoint_type:
+                return rule
+        return None
+    
     def calculate_propagated_trust(self,
                                   consumed_trusts: List[Tuple[float, float]],
                                   endpoint_type: EndpointType,
                                   endpoint_class: str) -> float:
         """
         Calculate propagated trust value based on consumed assertions
-        consumed_trusts: List of (trust_value, weight) tuples
+        
+        Args:
+            consumed_trusts: List of (trust_value, weight) tuples 
+                           ONLY for assertions where apply_to_trust=True
+            endpoint_type: Type of the endpoint creating the assertion
+            endpoint_class: Class of the endpoint for ceiling lookup
+            
+        Returns:
+            Calculated trust value, capped by endpoint's trust ceiling
         """
         if not consumed_trusts:
+            # No consumed assertions - return the trust ceiling for this endpoint class
             return self.get_trust_ceiling(endpoint_class)
         
         # Extract trust values and weights
         trust_values = [t for t, _ in consumed_trusts]
         weights = [w for _, w in consumed_trusts]
         
-        # Find applicable rule
-        rule = None
-        for r in self.propagation_rules.values():
-            if r.endpoint_type == endpoint_type:
-                rule = r
-                break
+        # Normalize weights to sum to 1.0 if they don't
+        total_weight = sum(weights)
+        if total_weight > 0 and abs(total_weight - 1.0) > 0.01:
+            weights = [w / total_weight for w in weights]
+            consumed_trusts = [(t, w) for (t, _), w in zip(consumed_trusts, weights)]
         
-        if not rule:
-            # Default to minimum propagation if no rule defined
+        # Find applicable rule
+        rule = self.get_rule_for_endpoint_type(endpoint_type)
+        
+        if not rule or rule.propagation_method == 'minimum':
+            # Default to minimum propagation - most conservative
             trust = min(trust_values)
-        else:
-            if rule.propagation_method == 'minimum':
-                trust = min(trust_values)
-            elif rule.propagation_method == 'weighted_average':
-                total_weight = sum(weights)
-                if total_weight > 0:
-                    trust = sum(t * w for t, w in consumed_trusts) / total_weight
-                else:
-                    trust = min(trust_values)
-            elif rule.propagation_method == 'consensus':
-                threshold = rule.consensus_threshold or 0.7
-                high_trust_values = [t for t in trust_values if t >= threshold]
-                if len(high_trust_values) >= len(trust_values) * 0.5:
-                    trust = sum(high_trust_values) / len(high_trust_values)
-                else:
-                    trust = min(trust_values)
+            
+        elif rule.propagation_method == 'weighted_average':
+            # Weighted average based on materiality weights
+            if total_weight > 0:
+                trust = sum(t * w for t, w in consumed_trusts)
             else:
                 trust = min(trust_values)
+                
+        elif rule.propagation_method == 'consensus':
+            # Consensus-based propagation
+            threshold = rule.consensus_threshold or 0.7
+            high_trust_values = [t for t in trust_values if t >= threshold]
+            if len(high_trust_values) >= len(trust_values) * 0.5:
+                # Majority have high trust - use their average
+                trust = sum(high_trust_values) / len(high_trust_values)
+            else:
+                # No consensus - fall back to minimum
+                trust = min(trust_values)
+        else:
+            # Unknown method - default to minimum
+            trust = min(trust_values)
         
         # Apply trust ceiling constraint
         max_trust = self.get_trust_ceiling(endpoint_class)
@@ -286,6 +326,7 @@ class BlockchainAuditTrail:
                 content TEXT,
                 metadata TEXT NOT NULL,
                 consumed_assertions TEXT,
+                consumed_assertion_materiality TEXT,
                 timestamp REAL NOT NULL,
                 block_hash TEXT,
                 FOREIGN KEY (block_hash) REFERENCES blocks(hash)
@@ -375,21 +416,25 @@ class BlockchainAuditTrail:
         
         # Convert metadata to dict and handle enum serialization
         if assertion.metadata:
-            # Convert EndpointType enum to string for JSON serialization
             metadata_dict = asdict(assertion.metadata)
             metadata_json = json.dumps(metadata_dict)
         else:
             metadata_json = '{}'
         
+        # Serialize materiality specs
+        materiality_json = json.dumps(assertion.consumed_assertion_materiality)
+        
         cursor.execute('''
-            INSERT INTO assertions (id, endpoint_id, content, metadata, consumed_assertions, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO assertions (id, endpoint_id, content, metadata, consumed_assertions, 
+                                  consumed_assertion_materiality, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         ''', (
             assertion.id,
             assertion.endpoint_id,
             json.dumps(assertion.content),
             metadata_json,
             json.dumps(assertion.consumed_assertions),
+            materiality_json,
             assertion.timestamp
         ))
         
@@ -438,6 +483,7 @@ class BlockchainAuditTrail:
                     'content': json.loads(row['content']) if row['content'] else None,
                     'metadata': json.loads(row['metadata']),
                     'consumed_assertions': json.loads(row['consumed_assertions']),
+                    'consumed_assertion_materiality': json.loads(row['consumed_assertion_materiality'] or '{}'),
                     'timestamp': row['timestamp'],
                     'block_hash': row['block_hash']
                 }
@@ -498,11 +544,12 @@ class TrustKernel:
                         endpoint_class: str,
                         endpoint_type: EndpointType,
                         content: Any,
-                        confidence: float, 
-                        trust_value: float = 0.,
-                        trust_explanation = None,
-                        consumed_assertion_ids: List[str] = None,
-                        limitations: Dict[str, Any] = None) -> Assertion:
+                        confidence: float,
+                        trust_explanation: str,  # REQUIRED - endpoints must explain their trust
+                        consumed_assertion_ids: Optional[List[str]] = None,
+                        consumed_assertion_materiality: Optional[Dict[str, MaterialitySpec]] = None,
+                        limitations: Optional[Dict[str, Any]] = None,
+                        temporal_validity: Optional[float] = None) -> Assertion:
         """
         Create a new assertion with trust evaluation
         
@@ -512,88 +559,128 @@ class TrustKernel:
             endpoint_type: Type of endpoint (sensor, ml_model, llm, etc.)
             content: The actual assertion content/data
             confidence: Self-reported confidence (0.0-1.0)
-            trust_value: Optional trust value - ONLY used for root assertions without consumed assertions
+            trust_explanation: REQUIRED explanation of trust status from the endpoint
+                - For root assertions: why the endpoint believes it's trustworthy
+                - For derived assertions: interpretation of consumed assertions' trust
             consumed_assertion_ids: List of assertion IDs this assertion is based on
+            consumed_assertion_materiality: Dict mapping assertion_id to (weight, apply_to_trust) tuple
+                - weight: 0.0-1.0 relative importance of this input
+                - apply_to_trust: whether this input should affect trust propagation
             limitations: Any limitations or caveats about this assertion
+            temporal_validity: Optional temporal validity (defaults to 1.0)
+        
+        Example:
+            consumed_assertion_materiality={
+                "sensor-123": (0.7, True),   # 70% weight, affects trust
+                "sensor-456": (0.3, True),   # 30% weight, affects trust
+                "debug-789": (0.0, False),   # Context only, no trust impact
+            }
         
         Note: 
-        
-        Sophisticated endpoints may use an AI (SLM or LLM) or other logic to INTERPRET trust 
-        explanations from consumed assertions and adjust trust accordingly. 
-        
-        An AI is NOT required to GENERATE assertions / trust explanations.
-
+        - Trust value is ALWAYS calculated by the framework, never passed as parameter
+        - Trust explanation is ALWAYS provided by the endpoint, never auto-generated
+        - For root assertions (no consumed assertions): trust = trust ceiling
+        - For derived assertions: trust = propagated trust, capped by ceiling
+        - Only assertions with apply_to_trust=True affect trust propagation
         """
         consumed_assertion_ids = consumed_assertion_ids or []
+        consumed_assertion_materiality = consumed_assertion_materiality or {}
         limitations = limitations or {}
         provenance_chain = []
-
+        
+        # Validate confidence
+        if not 0.0 <= confidence <= 1.0:
+            raise ValueError(f"Confidence must be between 0.0 and 1.0, got {confidence}")
+        
+        # Validate required trust_explanation
+        # endpoint MAY use an AI to assess consumed assertions to develop the trust_explanation
+        if not trust_explanation:
+            raise ValueError("trust_explanation is required - endpoints must explain their trust status")
+        
         # Calculate trust based on consumed assertions
-        # Note: Materiality is determined internally by the endpoint
-        # This reference implementation uses equal weights for simplicity
-        consumed_trusts = []
-
-        for assertion_id in consumed_assertion_ids:
-            consumed = self.get_assertion(assertion_id)
-            if consumed and consumed.metadata:
-                # In a real endpoint, materiality would be determined based on
-                # the endpoint's understanding of input importance
-                # Example:
-                # materiality = self.determine_materiality(consumed, self.context)
-                materiality = 1.0  # Equal weight for reference implementation
-                consumed_trusts.append((consumed.metadata.trust_value, materiality))
-                
-                # Build provenance chain
-                if consumed.metadata.provenance:
-                    # Merge provenance chains from consumed assertions
-                    for endpoint in consumed.metadata.provenance:
-                        if endpoint not in provenance_chain:
-                            provenance_chain.append(endpoint)
-
-                # STUB: Sophisticated endpoints with AI (LLM or SLM) access can INTERPRET explanations
-                # from consumed assertions to make trust and materiality adjustments:
-                # 
-                # if consumed.metadata.trust_explanation:
-                #     # Use AI to understand if "sensor uncalibrated for 3 years" matters
-                #     understanding = self.understand_trust_explanation(consumed.metadata.trust_explanation, "ml_model")
-                #     if understanding:
-                #         adjusted_trust = ...
-                #         # Override trust if context makes it more/less relevant
-                #         consumed_trusts[-1] = (adjusted_trust, materiality)
-
+        consumed_trusts = []  # Only includes assertions where apply_to_trust=True
+        trust_input_count = 0
+        context_input_count = 0
+        
+        if consumed_assertion_ids:
+            # Validate and process materiality specs
+            trust_weights = []
+            
+            for assertion_id in consumed_assertion_ids:
+                consumed = self.get_assertion(assertion_id)
+                if consumed and consumed.metadata:
+                    # Get materiality spec with defaults
+                    mat_spec = consumed_assertion_materiality.get(assertion_id, (1.0, True))
+                    
+                    # Validate tuple format
+                    if not isinstance(mat_spec, tuple) or len(mat_spec) != 2:
+                        raise ValueError(f"Materiality spec for {assertion_id} must be (weight, apply_to_trust) tuple")
+                    
+                    weight, apply_to_trust = mat_spec
+                    
+                    # Validate weight
+                    if not 0.0 <= weight <= 1.0:
+                        warnings.warn(f"Weight for {assertion_id} should be 0.0-1.0, got {weight}")
+                        weight = max(0.0, min(1.0, weight))  # Clamp to valid range
+                    
+                    if apply_to_trust:
+                        # This assertion affects trust propagation
+                        consumed_trusts.append((consumed.metadata.trust_value, weight))
+                        trust_weights.append(weight)
+                        trust_input_count += 1
+                    else:
+                        # This assertion is for context only
+                        context_input_count += 1
+                    
+                    # Build provenance chain from all consumed assertions
+                    if consumed.metadata.provenance:
+                        for endpoint in consumed.metadata.provenance:
+                            if endpoint not in provenance_chain:
+                                provenance_chain.append(endpoint)
+            
+            # Validate that trust weights sum to approximately 1.0
+            if trust_weights:
+                total_weight = sum(trust_weights)
+                if abs(total_weight - 1.0) > 0.1:
+                    warnings.warn(
+                        f"Trust-affecting weights sum to {total_weight:.2f}, expected ~1.0. "
+                        f"Weights will be normalized."
+                    )
+        
         # Add current endpoint to the chain
         if endpoint_class not in provenance_chain:
             provenance_chain.append(endpoint_class)
-       
-        # Calculate propagated trust
+        
+        # Calculate trust value
         if consumed_trusts:
-            # When there are consumed assertions, use propagation rules
+            # Derived assertion: use propagation rules
             trust_value = self.authority.calculate_propagated_trust(
                 consumed_trusts, endpoint_type, endpoint_class
             )
-        elif trust_value == 0.:
-            # No consumed assertions and no trust provided, use ceiling
+        else:
+            # Root assertion: trust equals the ceiling for this endpoint class
             trust_value = self.authority.get_trust_ceiling(endpoint_class)
         
-        # Generate trust explanation as appropriate
-        if trust_explanation is None:
-            trust_explanation = 'ok'
+        # Set temporal validity
+        if temporal_validity is None:
+            temporal_validity = 1.0
+        elif not 0.0 <= temporal_validity <= 1.0:
+            warnings.warn(f"Temporal validity should be 0.0-1.0, got {temporal_validity}")
+            temporal_validity = max(0.0, min(1.0, temporal_validity))
         
-        # STUB: Endpoints generate explanations
-        # Simple example:
-        # if calculated_trust < 0.5:
-        #     trust_explanation = f"Trust is low ({calculated_trust:.2f}) due to upstream data quality issues"
-        
+        # Create metadata
         metadata = TrustMetadata(
-            trust_value=trust_value,
+            trust_value=trust_value,  # CALCULATED, not provided
             confidence_value=confidence,
             trust_explanation=trust_explanation,
-            temporal_validity=1.0,  # Could be calculated based on data age
+            temporal_validity=temporal_validity,
             endpoint_id=endpoint_id,
             endpoint_type=endpoint_type,
             endpoint_class=endpoint_class,
             timestamp=time.time(),
             provenance=provenance_chain,
+            trust_input_count=trust_input_count,
+            context_input_count=context_input_count,
             limitations=limitations
         )
         
@@ -602,7 +689,8 @@ class TrustKernel:
             endpoint_id=endpoint_id,
             content=content,
             metadata=metadata,
-            consumed_assertions=consumed_assertion_ids
+            consumed_assertions=consumed_assertion_ids,
+            consumed_assertion_materiality=consumed_assertion_materiality
         )
         
         # Add to audit trail
@@ -639,9 +727,20 @@ class TrustKernel:
                 endpoint_class=metadata_dict.get('endpoint_class', ''),
                 timestamp=metadata_dict['timestamp'],
                 provenance=metadata_dict.get('provenance', []),
+                trust_input_count=metadata_dict.get('trust_input_count', 0),
+                context_input_count=metadata_dict.get('context_input_count', 0),
                 limitations=metadata_dict.get('limitations', {}),
                 context=metadata_dict.get('context', {})
             )
+            
+            # Reconstruct materiality specs
+            mat_dict = assertion_data.get('consumed_assertion_materiality', {})
+            materiality_specs = {}
+            for aid, spec in mat_dict.items():
+                if isinstance(spec, list) and len(spec) == 2:
+                    materiality_specs[aid] = tuple(spec)
+                else:
+                    materiality_specs[aid] = (1.0, True)  # Default
             
             assertion = Assertion(
                 id=assertion_data['id'],
@@ -649,6 +748,7 @@ class TrustKernel:
                 content=assertion_data['content'],
                 metadata=metadata,
                 consumed_assertions=assertion_data['consumed_assertions'],
+                consumed_assertion_materiality=materiality_specs,
                 timestamp=assertion_data['timestamp']
             )
             
@@ -667,7 +767,7 @@ class TrustKernel:
         
         return block
     
-    def get_trust_confidence_matrix(self, assertion_id: str) -> Dict[str, str]:
+    def get_trust_confidence_matrix(self, assertion_id: str) -> Dict[str, Any]:
         """
         Get trust-confidence matrix classification for an assertion
         
@@ -727,10 +827,7 @@ class TrustKernel:
         
         Returns a structured tree showing how this assertion was derived,
         including all consumed assertions, their trust/confidence values,
-        and explanations at each step.
-        
-        This is the key function for business leaders to understand the
-        complete evidence chain behind an AI recommendation.
+        explanations, and materiality specifications.
         """
         def build_assertion_tree(aid: str, visited: set = None) -> Dict:
             """Recursively build the assertion tree"""
@@ -757,6 +854,8 @@ class TrustKernel:
                 "confidence_value": assertion.metadata.confidence_value if assertion.metadata else None,
                 "temporal_validity": assertion.metadata.temporal_validity if assertion.metadata else None,
                 "trust_explanation": assertion.metadata.trust_explanation if assertion.metadata else None,
+                "trust_input_count": assertion.metadata.trust_input_count if assertion.metadata else 0,
+                "context_input_count": assertion.metadata.context_input_count if assertion.metadata else 0,
                 "timestamp": assertion.timestamp,
                 "consumed_assertions": []
             }
@@ -764,6 +863,10 @@ class TrustKernel:
             # Recursively build tree for consumed assertions
             for consumed_id in assertion.consumed_assertions:
                 child_node = build_assertion_tree(consumed_id, visited.copy())
+                # Add materiality info
+                mat_spec = assertion.consumed_assertion_materiality.get(consumed_id, (1.0, True))
+                child_node["materiality_weight"] = mat_spec[0]
+                child_node["affects_trust"] = mat_spec[1]
                 node["consumed_assertions"].append(child_node)
             
             return node
@@ -807,9 +910,11 @@ class TrustKernel:
             weakest = (node["trust_value"], node, current_path)
             
             for child in node.get("consumed_assertions", []):
-                child_weakest = find_weakest_link(child, current_path)
-                if child_weakest[0] is not None and (weakest[0] is None or child_weakest[0] < weakest[0]):
-                    weakest = child_weakest
+                # Only consider assertions that affect trust
+                if child.get("affects_trust", True):
+                    child_weakest = find_weakest_link(child, current_path)
+                    if child_weakest[0] is not None and (weakest[0] is None or child_weakest[0] < weakest[0]):
+                        weakest = child_weakest
             
             return weakest
         
@@ -824,6 +929,8 @@ class TrustKernel:
             "chain_depth": max_depth,
             "root_trust": tree.get("trust_value"),
             "root_confidence": tree.get("confidence_value"),
+            "trust_inputs": tree.get("trust_input_count", 0),
+            "context_inputs": tree.get("context_input_count", 0),
             "weakest_link": {
                 "trust_value": trust_value,
                 "endpoint_id": weakest_node["endpoint_id"] if weakest_node else None,
@@ -864,6 +971,8 @@ class TrustKernel:
         summary = evidence["summary"]
         lines.append(f"\nChain Depth: {summary['chain_depth']} levels")
         lines.append(f"Total Assertions: {summary['total_assertions']}")
+        lines.append(f"Trust-Affecting Inputs: {summary['trust_inputs']}")
+        lines.append(f"Context-Only Inputs: {summary['context_inputs']}")
         lines.append(f"\nFinal Trust: {summary['root_trust']:.2f}")
         lines.append(f"Final Confidence: {summary['root_confidence']:.2f}")
         lines.append(f"Assessment: {summary['trust_confidence_assessment']['status']}")
@@ -884,7 +993,16 @@ class TrustKernel:
                 return
             
             prefix = "  " * indent + "└─ " if indent > 0 else ""
-            lines.append(f"{prefix}{node['endpoint_id']} ({node['endpoint_type']})")
+            affects_trust = node.get("affects_trust", True)
+            weight = node.get("materiality_weight", 1.0)
+            
+            trust_indicator = "✓" if affects_trust else "○"
+            lines.append(f"{prefix}{trust_indicator} {node['endpoint_id']} ({node['endpoint_type']})")
+            
+            if indent > 0:  # Show materiality for consumed assertions
+                lines.append(f"{'  ' * (indent + 1)}Weight: {weight:.2f}, "
+                           f"Affects Trust: {affects_trust}")
+            
             lines.append(f"{'  ' * (indent + 1)}Trust: {node['trust_value']:.2f}, "
                         f"Confidence: {node['confidence_value']:.2f}, "
                         f"Temporal: {node['temporal_validity']:.2f}")
@@ -912,6 +1030,8 @@ class TrustKernel:
         lines.append("## Summary\n")
         lines.append(f"- **Chain Depth**: {summary['chain_depth']} levels")
         lines.append(f"- **Total Assertions**: {summary['total_assertions']}")
+        lines.append(f"- **Trust-Affecting Inputs**: {summary['trust_inputs']}")
+        lines.append(f"- **Context-Only Inputs**: {summary['context_inputs']}")
         lines.append(f"- **Final Trust**: {summary['root_trust']:.2f}")
         lines.append(f"- **Final Confidence**: {summary['root_confidence']:.2f}")
         lines.append(f"- **Assessment**: `{summary['trust_confidence_assessment']['status']}`")
@@ -933,8 +1053,15 @@ class TrustKernel:
             
             indent = "  " * level
             bullet = "- " if level == 0 else "  - "
+            affects_trust = node.get("affects_trust", True)
+            weight = node.get("materiality_weight", 1.0)
             
-            lines.append(f"{indent}{bullet}**{node['endpoint_id']}** (`{node['endpoint_type']}`)")
+            trust_indicator = "✅" if affects_trust else "📎"
+            lines.append(f"{indent}{bullet}{trust_indicator} **{node['endpoint_id']}** (`{node['endpoint_type']}`)")
+            
+            if level > 0:  # Show materiality for consumed assertions
+                lines.append(f"{indent}  - Materiality: {weight:.1%} | Trust Impact: {affects_trust}")
+            
             lines.append(f"{indent}  - Trust: {node['trust_value']:.2f} | "
                         f"Confidence: {node['confidence_value']:.2f} | "
                         f"Temporal: {node['temporal_validity']:.2f}")
