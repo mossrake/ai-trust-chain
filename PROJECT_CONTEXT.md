@@ -110,8 +110,11 @@ ai-trust-chain/
 ├── README.md                 # Complete documentation
 ├── LICENSE                   # AGPL-3.0 with IP notice
 ├── requirements.txt          # Python dependencies
-├── .gitignore               # Git ignore patterns
-└── PROJECT_CONTEXT.md        # This file
+├── .gitignore                # Git ignore patterns
+├── PROJECT_CONTEXT.md        # This file
+├── docs/                    
+    ├── The AI Trust Chain.pdf                  # original whitepaper
+    └── The Endpoint Developer Framework.pdf    # This file
 ```
 
 ## API Patterns

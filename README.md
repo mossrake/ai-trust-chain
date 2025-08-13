@@ -195,7 +195,7 @@ curl -X POST http://localhost:5000/api/v1/trust/endpoint-class \
   }'
 ```
 
-#### Creating a Chain of Assertions
+#### Creating Assertions
 
 First, create a sensor assertion:
 
