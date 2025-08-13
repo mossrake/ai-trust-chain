@@ -48,6 +48,200 @@ def print_trust_flow(from_trust: float, to_trust: float, reason: str):
     print(f"\n{color}   Trust Flow: {from_trust:.3f} {symbol} {to_trust:.3f}{Colors.ENDC}")
     print(f"   {Colors.BOLD}Why:{Colors.ENDC} {reason}")
 
+def generate_llm_assertion_content(consumed_details: List[Dict]) -> Dict:
+    """
+    Use Azure OpenAI to generate the actual LLM assertion content
+    by synthesizing the consumed assertions into a recommendation
+    """
+    print(f"\n{Colors.CYAN}🤖 LLM CONTENT GENERATION{Colors.ENDC}")
+    print(f"   Synthesizing {len(consumed_details)} inputs into recommendation...")
+    
+    if not AZURE_OPENAI_KEY or AZURE_OPENAI_KEY == "your-api-key":
+        print(f"   {Colors.WARNING}⚠️  Azure OpenAI not configured - using fallback content{Colors.ENDC}")
+        
+        # Fallback: Create basic content from consumed data
+        door_status = "unknown"
+        ml_prediction = "unknown"
+        temp_readings = []
+        
+        for detail in consumed_details:
+            content = detail.get('content', {})
+            if 'door' in detail['id'].lower():
+                door_status = "open" if content.get('is_open', False) else "closed"
+            elif 'ml-model' in detail['id']:
+                ml_prediction = content.get('prediction', 'unknown')
+            elif 'temp-sensor' in detail['id']:
+                if 'temperature' in content:
+                    temp_readings.append(content['temperature'])
+        
+        if door_status == "open":
+            recommendation = (
+                f"URGENT: Door sensor reports OPEN status. "
+                f"Immediate action required to prevent temperature excursion. "
+                f"Current temperatures: {temp_readings}°F. "
+                f"ML model indicates: {ml_prediction}."
+            )
+            risk_level = "high"
+        else:
+            recommendation = (
+                f"Door is {door_status}. Temperatures at {temp_readings}°F. "
+                f"ML model prediction: {ml_prediction}. "
+                f"Monitor situation and schedule maintenance if patterns persist."
+            )
+            risk_level = "medium" if ml_prediction == "maintenance_required" else "low"
+        
+        return {
+            "recommendation": recommendation,
+            "risk_level": risk_level,
+            "analysis": "Fallback analysis without AI synthesis",
+            "action_items": ["Review sensor data", "Take appropriate action"]
+        }
+    
+    # Build context for LLM to synthesize
+    print(f"\n   {Colors.BOLD}Preparing synthesis context...{Colors.ENDC}")
+    
+    # Prepare consumed data for the prompt
+    consumed_data = []
+    for d in consumed_details:
+        consumed_data.append({
+            'source': d['id'],
+            'content': d['content'],
+            'trust_level': d.get('trust_value', 'N/A'),
+            'trust_explanation': d.get('trust_explanation', '')
+        })
+    
+    llm_prompt = f"""You are an LLM endpoint in a trust chain system that needs to synthesize multiple data sources into an actionable recommendation.
+
+Your role is to analyze the actual values from consumed assertions and create a specific, actionable recommendation based on what you observe.
+
+Consumed assertions:
+{json.dumps(consumed_data, indent=2)}
+
+Instructions:
+1. Analyze the ACTUAL VALUES in the consumed content (temperatures, door status, predictions, etc.)
+2. Synthesize these into a SPECIFIC recommendation that addresses what you see
+3. Don't give generic advice - be specific about the actual conditions observed
+4. If a door is open, say it's open. If temperatures are high, state the actual values
+5. Provide concrete action steps based on the current state
+
+Respond with JSON containing:
+{json.dumps({
+    "recommendation": "A specific, detailed recommendation based on the actual data you see above",
+    "risk_level": "high/medium/low based on actual conditions",
+    "analysis": "Your synthesis of what the consumed data shows",
+    "action_items": ["Specific action 1", "Specific action 2", "..."],
+    "key_observations": ["What you actually found in the data"]
+}, indent=2)}
+
+Remember: Be specific about what you see in the data, not generic."""
+    
+    print(f"   {Colors.BOLD}Calling Azure OpenAI for content synthesis...{Colors.ENDC}")
+    
+    headers = {
+        "Content-Type": "application/json",
+        "api-key": AZURE_OPENAI_KEY
+    }
+    
+    try:
+        response = requests.post(
+            f"{AZURE_OPENAI_ENDPOINT}/openai/deployments/{AZURE_OPENAI_DEPLOYMENT}/chat/completions?api-version={AZURE_API_VERSION}",
+            headers=headers,
+            json={
+                "messages": [
+                    {"role": "system", "content": "You are an intelligent LLM endpoint that synthesizes sensor data, ML predictions, and other inputs into specific, actionable recommendations. Always reference the actual values you see in the data."},
+                    {"role": "user", "content": llm_prompt}
+                ],
+                "temperature": 0.7,
+                "max_tokens": 600
+            }
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            
+            # Check if we got a valid response
+            if 'choices' not in result or len(result['choices']) == 0:
+                print(f"   {Colors.WARNING}⚠️  Unexpected response format from Azure OpenAI{Colors.ENDC}")
+                print(f"   Response: {json.dumps(result, indent=2)[:500]}")
+                return {
+                    "recommendation": "Unable to generate AI recommendation - unexpected response format",
+                    "risk_level": "unknown",
+                    "analysis": "AI response format error",
+                    "action_items": ["Manual review required"]
+                }
+            
+            llm_response = result['choices'][0]['message']['content']
+            
+            # Debug: Show what we got
+            #print(f"   {Colors.BOLD}Raw AI Response (first 200 chars):{Colors.ENDC}")
+            #print(f"   {llm_response[:200]}...")
+            
+            # Clean up the response - remove markdown code blocks if present
+            cleaned_response = llm_response.strip()
+            if cleaned_response.startswith('```json'):
+                cleaned_response = cleaned_response[7:]  # Remove ```json
+            elif cleaned_response.startswith('```'):
+                cleaned_response = cleaned_response[3:]  # Remove ```
+            
+            if cleaned_response.endswith('```'):
+                cleaned_response = cleaned_response[:-3]  # Remove trailing ```
+            
+            cleaned_response = cleaned_response.strip()
+            
+            try:
+                # Try to parse the cleaned JSON response
+                llm_content = json.loads(cleaned_response)
+                
+                print(f"\n   {Colors.GREEN}✅ LLM Content Generated:{Colors.ENDC}")
+                print(f"   {Colors.BOLD}Risk Level:{Colors.ENDC} {llm_content.get('risk_level', 'unknown')}")
+                print(f"   {Colors.BOLD}Key Observations:{Colors.ENDC}")
+                for obs in llm_content.get('key_observations', [])[:3]:
+                    print(f"     • {obs}")
+                print(f"   {Colors.BOLD}Recommendation Preview:{Colors.ENDC}")
+                print(f"     {llm_content.get('recommendation', '')[:150]}...")
+                
+                return llm_content
+                
+            except json.JSONDecodeError as e:
+                print(f"   {Colors.WARNING}⚠️  Could not parse LLM response as JSON{Colors.ENDC}")
+                print(f"   JSON Error: {str(e)}")
+                print(f"   Cleaned response (first 300 chars): {cleaned_response[:300]}")
+                
+                # Try to extract meaningful content from the response
+                if cleaned_response and len(cleaned_response) > 0:
+                    # Use the raw response as the recommendation if it's text
+                    return {
+                        "recommendation": cleaned_response[:500],
+                        "risk_level": "medium",
+                        "analysis": "AI provided text response instead of JSON",
+                        "action_items": ["Review the text recommendation above", "Take appropriate action"],
+                        "key_observations": ["Response was not in expected JSON format"]
+                    }
+                else:
+                    return {
+                        "recommendation": "Failed to generate AI recommendation - empty response",
+                        "risk_level": "unknown",
+                        "analysis": "Empty AI response",
+                        "action_items": ["Manual review required"]
+                    }
+        else:
+            print(f"   {Colors.FAIL}❌ Azure OpenAI call failed: {response.status_code}{Colors.ENDC}")
+            return {
+                "recommendation": "Failed to generate AI recommendation - manual review required",
+                "risk_level": "unknown",
+                "analysis": "AI synthesis unavailable",
+                "action_items": ["Review consumed assertions manually"]
+            }
+            
+    except Exception as e:
+        print(f"   {Colors.FAIL}❌ Error calling Azure OpenAI: {e}{Colors.ENDC}")
+        return {
+            "recommendation": "Error generating recommendation - manual review required",
+            "risk_level": "unknown",
+            "analysis": f"Error: {str(e)}",
+            "action_items": ["Check system configuration", "Review data manually"]
+        }
+
 def understand_trust_explanation(consumed_assertions: List[Dict], endpoint_type: str) -> Dict:
     """
     Use Azure OpenAI to understand trust explanations from consumed assertions
@@ -115,7 +309,7 @@ def understand_trust_explanation(consumed_assertions: List[Dict], endpoint_type:
             }}
         }},
         "confidence_impact": 0.9,
-        "trust_explanation": "Overall trust status explanation"
+        "trust_explanation": "your detailed trust status explanation, naming the endpoints by their instance label"
     }}
     
     Guidelines:
@@ -148,7 +342,7 @@ def understand_trust_explanation(consumed_assertions: List[Dict], endpoint_type:
                 ai_result = json.loads(llm_response)
                 
                 print(f"\n   {Colors.GREEN}✅ AI Analysis Complete:{Colors.ENDC}")
-                print(f"   {Colors.BOLD}Understanding:{Colors.ENDC} {ai_result.get('understanding', '')[:150]}...")
+                print(f"   {Colors.BOLD}Understanding:{Colors.ENDC} {ai_result.get('understanding', '')}...")
                 
                 # Convert and explain AI's materiality decisions
                 tuple_specs = {}
@@ -258,7 +452,7 @@ def initialize_system(token="admin-token"):
 
 def set_trust_ceiling(endpoint_class, max_trust, token="admin-token"):
     """Set trust ceiling for an endpoint class"""
-    print(f"\n{Colors.BLUE}📏 Setting Trust Ceiling{Colors.ENDC}")
+    print(f"\n{Colors.BLUE}🔐 Setting Trust Ceiling{Colors.ENDC}")
     print(f"   Endpoint Class: {endpoint_class}")
     print(f"   Maximum Trust: {max_trust}")
     
@@ -547,8 +741,8 @@ def create_llm_assertion(ml_id, door_id, metadata_id=None, token="llm-token"):
     print_reasoning(
         "LLM Trust Synthesis",
         "The LLM combines ML predictions with sensor data. It uses AI to\n" +
-        "   determine which inputs should affect trust vs. provide context.\n" +
-        "   This creates the final recommendation with traceable trust."
+        "   determine which inputs should affect trust vs. provide context,\n" +
+        "   then synthesizes the actual data into a specific recommendation."
     )
     
     # Get details of consumed assertions
@@ -573,7 +767,7 @@ def create_llm_assertion(ml_id, door_id, metadata_id=None, token="llm-token"):
             content_preview = str(details.get("content", {}))[:50]
             print(f"   • {aid}: Trust={metadata.get('trust_value', 'N/A')}, Content={content_preview}...")
     
-    # Use AI to synthesize and determine materiality
+    # Use AI to understand trust and determine materiality
     understanding = understand_trust_explanation(consumed_details, "llm")
     
     # Build materiality specifications
@@ -596,21 +790,23 @@ def create_llm_assertion(ml_id, door_id, metadata_id=None, token="llm-token"):
         else:
             print(f"   • {aid}: {Colors.WARNING}Context only{Colors.ENDC}")
     
-    # Generate recommendation based on trust
-    if understanding.get('confidence_impact', 1.0) < 0.7:
-        recommendation = "Requires immediate human review due to trust concerns"
-        risk_level = "high"
-        print(f"\n{Colors.FAIL}⚠️  LOW TRUST DETECTED - Recommending human review{Colors.ENDC}")
-    else:
-        recommendation = "Schedule maintenance within 48 hours; ensure door is properly sealed"
-        risk_level = "medium"
-        print(f"\n{Colors.GREEN}✓ Sufficient trust - Automated recommendation generated{Colors.ENDC}")
+    # Generate the actual LLM assertion content by synthesizing consumed data
+    llm_content = generate_llm_assertion_content(consumed_details)
+    
+    # Adjust confidence based on trust understanding
+    base_confidence = 0.88
+    adjusted_confidence = base_confidence * understanding.get('confidence_impact', 1.0)
+    
+    print(f"\n{Colors.BOLD}Final LLM Assertion:{Colors.ENDC}")
+    print(f"   Risk Level: {llm_content.get('risk_level', 'unknown')}")
+    print(f"   Confidence: {adjusted_confidence:.2f}")
     
     print_reasoning(
         "Final Recommendation Logic",
-        f"Based on propagated trust and confidence, the LLM determined:\n" +
-        f"   Risk Level: {risk_level}\n" +
-        f"   Action: {recommendation}"
+        f"The LLM synthesized the actual data from its inputs:\n" +
+        f"   - ML prediction, door status, temperature readings\n" +
+        f"   - Generated specific recommendations based on observed values\n" +
+        f"   - Risk Level: {llm_content.get('risk_level', 'unknown')}"
     )
     
     response = requests.post(
@@ -624,12 +820,14 @@ def create_llm_assertion(ml_id, door_id, metadata_id=None, token="llm-token"):
             "endpoint_class": "llm.gpt4",
             "endpoint_type": "llm",
             "content": {
-                "recommendation": recommendation,
-                "risk_level": risk_level,
-                "analysis": "Comprehensive analysis with trust and context inputs",
+                "recommendation": llm_content.get('recommendation', 'Failed to generate recommendation'),
+                "risk_level": llm_content.get('risk_level', 'unknown'),
+                "analysis": llm_content.get('analysis', 'LLM synthesis of consumed assertions'),
+                "action_items": llm_content.get('action_items', []),
+                "key_observations": llm_content.get('key_observations', []),
                 "timestamp": datetime.utcnow().isoformat()
             },
-            "confidence": 0.88 * understanding.get('confidence_impact', 1.0),
+            "confidence": adjusted_confidence,
             "trust_explanation": understanding['trust_explanation'],
             "consumed_assertions": all_consumed_ids,
             "consumed_assertion_materiality": materiality
@@ -646,9 +844,9 @@ def create_llm_assertion(ml_id, door_id, metadata_id=None, token="llm-token"):
         print(f"   Context Inputs: {data.get('context_input_count', 'N/A')}")
         
         # Show final trust flow
-        ml_trust = next(c['trust_value'] for c in consumed_details if c['id'] == ml_id)
-        door_trust = next(c['trust_value'] for c in consumed_details if c['id'] == door_id)
-        avg_input_trust = (ml_trust + door_trust) / 2
+        ml_trust = next((c['trust_value'] for c in consumed_details if c['id'] == ml_id), 0)
+        door_trust = next((c['trust_value'] for c in consumed_details if c['id'] == door_id), 0)
+        avg_input_trust = (ml_trust + door_trust) / 2 if ml_trust and door_trust else 0
         
         print_trust_flow(
             avg_input_trust,
@@ -884,13 +1082,14 @@ def main():
     
     print(f"\n{Colors.GREEN}🎯 Final LLM Assertion ID: {llm_id}{Colors.ENDC}")
     
-    print(f"\n{Colors.BOLD}📊 Key Insights Learned:{Colors.ENDC}")
-    print("   1. Trust values are NEVER self-reported - always calculated")
-    print("   2. Trust propagates through weighted averages of trust inputs")
-    print("   3. Context inputs provide information but don't affect trust")
-    print("   4. Each endpoint class has a trust ceiling it cannot exceed")
-    print("   5. The weakest link in the chain limits overall trust")
-    print("   6. AI can intelligently determine materiality of inputs")
+    #print(f"\n{Colors.BOLD}📊 Key Insights Learned:{Colors.ENDC}")
+    #print("   1. Trust values are NEVER self-reported - always calculated")
+    #print("   2. Trust propagates through weighted averages of trust inputs")
+    #print("   3. Context inputs provide information but don't affect trust")
+    #print("   4. Each endpoint class has a trust ceiling it cannot exceed")
+    #print("   5. The weakest link in the chain limits overall trust")
+    #print("   6. AI can intelligently determine materiality of inputs")
+    #print("   7. LLM endpoints synthesize actual data into specific recommendations")
     
     print(f"\n{Colors.CYAN}You can query assertion {llm_id} for more details.{Colors.ENDC}")
     print(f"{Colors.BOLD}The entire chain is immutably stored in the blockchain audit trail.{Colors.ENDC}")
